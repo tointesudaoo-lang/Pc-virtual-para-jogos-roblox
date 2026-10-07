@@ -1,0 +1,189 @@
+name: Remote Windows
+
+on:
+workflow_dispatch:
+
+jobs:
+windows-rdp:
+runs-on: windows-latest
+timeout-minutes: 3600
+
+steps:  
+
+  - name: Configure Windows  
+    shell: powershell  
+    run: |  
+      Write-Host "Preparando Windows..."  
+
+      # Habilita Remote Desktop  
+      Set-ItemProperty `  
+        -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `  
+        -Name "fDenyTSConnections" `  
+        -Value 0 `  
+        -Force  
+
+      # Serviço RDP  
+      Set-Service `  
+        -Name "TermService" `  
+        -StartupType Automatic  
+
+      Restart-Service `  
+        -Name "TermService" `  
+        -Force  
+
+      # Firewall  
+      Enable-NetFirewallRule `  
+        -DisplayGroup "Remote Desktop"  
+
+      Write-Host "Windows preparado."  
+
+  - name: Create Local Account  
+    shell: powershell  
+    run: |  
+
+      $User = "WinRemote"  
+      $Pass = "Remote!2026X7"  
+
+      $Existing = Get-LocalUser `  
+        -Name $User `  
+        -ErrorAction SilentlyContinue  
+
+      if ($Existing) {  
+          Remove-LocalUser `  
+            -Name $User  
+      }  
+
+      $Secure = ConvertTo-SecureString `  
+        $Pass `  
+        -AsPlainText `  
+        -Force  
+
+      New-LocalUser `  
+        -Name $User `  
+        -Password $Secure `  
+        -PasswordNeverExpires `  
+        -AccountNeverExpires  
+
+      Enable-LocalUser `  
+        -Name $User  
+
+      Add-LocalGroupMember `  
+        -SID "S-1-5-32-555" `  
+        -Member $User  
+
+      Write-Host "Conta criada: $User"  
+
+      "RDP_USERNAME=$User" >> $env:GITHUB_ENV  
+      "RDP_PASSWORD=$Pass" >> $env:GITHUB_ENV  
+
+  - name: Check Account  
+    shell: powershell  
+    run: |  
+
+      Write-Host "Verificando conta..."  
+
+      Get-LocalUser `  
+        -Name "$env:RDP_USERNAME"  
+
+      Write-Host ""  
+      Write-Host "Grupo Remote Desktop Users:"  
+      Get-LocalGroupMember `  
+        -SID "S-1-5-32-555"  
+
+  - name: Install Tailscale  
+    shell: powershell  
+    run: |  
+
+      $File = "$env:TEMP\ts.msi"  
+
+      Invoke-WebRequest `  
+        "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" `  
+        -OutFile $File  
+
+      Start-Process `  
+        msiexec.exe `  
+        -Wait `  
+        -ArgumentList "/i `"$File`" /quiet /norestart"  
+
+      Remove-Item `  
+        $File `  
+        -Force  
+
+      Write-Host "Tailscale instalado."  
+
+  - name: Start Tailscale  
+    shell: powershell  
+    env:  
+      TS_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}  
+    run: |  
+
+      $TS = "$env:ProgramFiles\Tailscale\tailscale.exe"  
+
+      if (!(Test-Path $TS)) {  
+        throw "Tailscale não encontrado."  
+      }  
+
+      & $TS up `  
+        --authkey="$env:TS_KEY" `  
+        --hostname="rdp-$env:GITHUB_RUN_ID"  
+
+      Start-Sleep -Seconds 10  
+
+      $Address = (& $TS ip -4).Trim()  
+
+      if ([string]::IsNullOrWhiteSpace($Address)) {  
+        throw "Tailscale não forneceu um endereço IP."  
+      }  
+
+      "RDP_ADDRESS=$Address" >> $env:GITHUB_ENV  
+
+      Write-Host "Endereço Tailscale: $Address"  
+
+  - name: Check RDP  
+    shell: powershell  
+    run: |  
+
+      Write-Host "Verificando porta 3389..."  
+
+      $Result = Test-NetConnection `  
+        -ComputerName $env:RDP_ADDRESS `  
+        -Port 3389 `  
+        -WarningAction SilentlyContinue  
+
+      if (!$Result.TcpTestSucceeded) {  
+        throw "A porta RDP não respondeu."  
+      }  
+
+      Write-Host "RDP respondeu corretamente."  
+
+  - name: Display Login  
+    shell: powershell  
+    run: |  
+
+      Write-Host ""  
+      Write-Host "======================================"  
+      Write-Host "          REMOTE WINDOWS"  
+      Write-Host "======================================"  
+      Write-Host ""  
+      Write-Host "ENDERECO:"  
+      Write-Host "$env:RDP_ADDRESS"  
+      Write-Host ""  
+      Write-Host "USUARIO:"  
+      Write-Host ".\WinRemote"  
+      Write-Host ""  
+      Write-Host "SENHA:"  
+      Write-Host "$env:RDP_PASSWORD"  
+      Write-Host ""  
+      Write-Host "PORTA:"  
+      Write-Host "3389"  
+      Write-Host ""  
+      Write-Host "======================================"  
+
+  - name: Keep Session Running  
+    shell: powershell  
+    run: |  
+
+      while ($true) {  
+        Write-Host "[$(Get-Date)] Windows remoto ativo."  
+        Start-Sleep -Seconds 300  
+      }
